@@ -20,7 +20,7 @@ Loading the data
 #drop the NAs to prevent errors when plotting
 graffiti <- read_csv(here("Graffiti.csv")) %>%
   na.omit()
-shape <- read_csv(here("Census_2010_Tracts_20231213.csv"))
+shape <- st_read(here("Census 2010 Tracts", "geo_export_fd7daba4-f63c-4100-8878-9512e08d03fc.shp"))
 ```
 Reviewing the variable types to ensure that there are no columns represented as character types that should be numeric due to the presence of missing values
 ```{r}
@@ -31,7 +31,7 @@ Datatypelist <- graffiti %>%
                values_to="Variable_class")
 Datatypelist
 ```
-As the point column shows, the location is being recorded in latitude & longitude. We need to first convert them into sf object and set the standard global crs.
+As the point column shows, the location is being recorded in latitude & longitude. We need to first convert them into sf object and set the lcoal crs https://epsg.io/7131
 ```{r}
 points <- graffiti %>%
   mutate(
@@ -42,24 +42,221 @@ points <- graffiti %>%
   filter(x>0 & y<0) %>%
   #standardise the column names
   clean_names() %>% 
-  st_as_sf(., coords = c("x", "y"), 
-                   crs = 7131) %>% 
-   select(-point)
-
-
+  st_as_sf(., coords = c("y", "x"), 
+                   crs = 4326) 
 ```
+project shape object into local crs
+```{r}
+shape_projected <- shape %>%
+  st_transform(., 7131) 
 
+shape_filtered_projected <- shape_projected[-190, ]
+```
+project the points
+```{r}
+projected_points <- points %>%
+  st_transform(., crs=7131)
+```
 
 
 
 quickly plot the data to get an overall sense and potential distribution of the data
 ```{r}
 tmap_mode("plot")
-tm_shape(points) +
+tm_shape(shape) +
   tm_polygons(col = NA, alpha = 0.5) +
 tm_shape(points) +
   tm_dots(col = "blue")
 ```
+spatial subset
+```{r}
+graffiti_within <- projected_points[shape_projected, ,op=st_intersects]
+
+```
+
+select offensive ones
+```{r}
+points_2023 <- projected_points %>% 
+  filter(str_detect(opened, "2023")) %>%
+  filter(!str_detect(status_notes, "duplicate")) %>% 
+  filter(!str_detect(request_details, "Not_Offensive")) 
+
+
+```
+
+create a window
+```{r}
+window <- as.owin(shape_projected)
+plot(window)
+```
+
+```{r}
+#create a sp object
+points_2023_sp<- points_2023 %>%
+  as(., 'Spatial')
+#create a ppp object
+points_2023_sp.ppp <- ppp(x=points_2023_sp@coords[,1],
+                          y=points_2023_sp@coords[,2],
+                          window=window)
+```
+
+
+plot the ppp
+```{r}
+points_2023_sp.ppp %>%
+  plot(.,pch=16,cex=0.5, 
+       main="San Francisco Graffiti 2023")
+```
+Ripley's K
+```{r}
+K <- points_2023_sp.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+```
+not useful
+
+```{r}
+library(raster)
+library(fpc)
+library(dbscan)
+library(ggplot2)
+
+#first extract the points from the spatial points data frame
+points_2023_extracted <- points_2023_sp %>%
+coordinates(.)%>%
+as.data.frame()
+
+#now run the dbscan analysis
+db <- points_2023_extracted %>%
+fpc::dbscan(.,eps = 200, MinPts = 500)
+
+#now plot the results
+plot(db, points_2023_extracted, main = "DBSCAN Output", frame = F)
+plot(shape_projected$geometry, add=T)
+```
+```{r}
+points_2023_extracted%>%
+  dbscan::kNNdistplot(.,k=500)
+points_2023_extracted <- points_2023_extracted %>%
+  mutate(dbcluster=db$cluster)
+```
+```{r}
+tosf <- points_2023_extracted%>%
+  st_as_sf(., coords = c("coords.x1", "coords.x2"), 
+                   crs = 7131)%>%
+  filter(dbcluster>0)
+
+ggplot(data = shape_projected) +
+  # add the geometry of the community areas
+  geom_sf() +
+  # add the geometry of the points - i have had to set the data here to add the layer
+  geom_sf(data = tosf, size = 0.4, colour=tosf$dbcluster, fill=tosf$dbcluster)
+```
+
+_____________________________________
+Regression Model Atttempt
+
+First, calculate the density 
+```{r}
+points_sf_joined <- shape_projected %>% 
+  mutate(n = lengths(st_intersects(., points_2023)))%>%
+  janitor::clean_names()%>%
+  #calculate area
+  mutate(area=st_area(.))%>%
+  #then density of the points per ward
+  mutate(density=n/area)
+  #select density and some other variables 
+
+tm_shape(points_sf_joined) +
+    tm_polygons("density",
+        style="jenks",
+        palette="PuOr",
+        title="Graffiti density")
+```
+
+
+```{r}
+library(spdep)
+#calculate the centroids
+
+
+coordsW <- points_sf_joined%>%
+  st_centroid()%>%
+  st_geometry()
+  
+plot(coordsW,axes=TRUE)
+```
+```{r}
+#create a neighbours list
+Graffiti_nb <- points_sf_joined %>%
+  poly2nb(., queen=T)
+summary(Graffiti_nb)
+```
+
+```{r}
+#plot them
+plot(Graffiti_nb, st_geometry(coordsW), col="red")
+#add a map underneath
+plot(points_sf_joined$geometry, add=T)
+```
+
+```{r}
+# make weight matrix
+Graffiti_nb.lw <- Graffiti_nb %>%
+  nb2mat(., style="W", zero.policy = TRUE)
+
+sum(Graffiti_nb.lw)
+
+# make weight list for Moran's I
+
+Graffiti_nb.lw <- Graffiti_nb %>%
+  nb2listw(., style="W", zero.policy = TRUE)
+```
+```{r}
+Graffiti_Density <- points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  moran.test(., Graffiti_nb.lw)
+
+Graffiti_Density
+```
+```{r}
+Graffiti_Density <- points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localmoran(., Graffiti_nb.lw)%>%
+  as_tibble()
+
+points_sf_joined <- points_sf_joined %>%
+  mutate(density_I =as.numeric(Graffiti_Density$Ii))%>%
+  mutate(density_Iz =as.numeric(Graffiti_Density$Z.Ii))
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+
+library(RColorBrewer)
+MoranColours<- rev(brewer.pal(8, "RdGy"))
+
+tm_shape(points_sf_joined) +
+    tm_polygons("density_Iz",
+        style="fixed",
+        breaks=breaks1,
+        palette=MoranColours,
+        midpoint=NA,
+        title="Local Moran's I, Graffiti in San Francisco 2023")
+
+
+
+```
+
+
+-----------------------------
+Regression
+
+
+```{r}
+
+```
+
+
 
 
 
