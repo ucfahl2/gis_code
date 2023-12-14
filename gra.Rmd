@@ -1,0 +1,67 @@
+project scope:
+
+
+
+Library the packages that might be used later
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(janitor)
+library(spatstat)
+library(spdep)
+library(RColorBrewer)
+library(tmaptools)
+library(here)
+```
+
+Loading the data
+```{r}
+#drop the NAs to prevent errors when plotting
+graffiti <- read_csv(here("Graffiti.csv")) %>%
+  na.omit()
+shape <- read_csv(here("Census_2010_Tracts_20231213.csv"))
+```
+Reviewing the variable types to ensure that there are no columns represented as character types that should be numeric due to the presence of missing values
+```{r}
+Datatypelist <- graffiti %>%
+  summarise_all(class) %>%
+  pivot_longer(everything(),
+               names_to="All_variables",
+               values_to="Variable_class")
+Datatypelist
+```
+As the point column shows, the location is being recorded in latitude & longitude. We need to first convert them into sf object and set the standard global crs.
+```{r}
+points <- graffiti %>%
+  mutate(
+    x = as.numeric(gsub("\\((.*),.*\\)", "\\1", Point)),
+    y = as.numeric(gsub("\\(.*, (.*)\\)", "\\1", Point))
+  ) %>%
+  #remove the remaining NA values
+  filter(x>0 & y<0) %>%
+  #standardise the column names
+  clean_names() %>% 
+  st_as_sf(., coords = c("x", "y"), 
+                   crs = 7131) %>% 
+   select(-point)
+
+
+```
+
+
+
+
+quickly plot the data to get an overall sense and potential distribution of the data
+```{r}
+tmap_mode("plot")
+tm_shape(points) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(points) +
+  tm_dots(col = "blue")
+```
+
+
+
+
+
