@@ -253,11 +253,65 @@ Regression
 
 
 ```{r}
+library(tidycensus)
+options(tigris_use_cache = TRUE)
+v20 <- load_variables(2020, "acs5")
+view(v20)
+
+
+census_SF <- get_acs(
+  state = "CA",
+  county = "San Francisco",
+  geography = "tract",
+  variables = c("B27001_001", "B01003_001"),
+  geometry = TRUE,
+  year = 2020
+)%>%
+    st_transform(., crs=7131)
+```
+
+calculate the percentage of having health care
+```{r}
+health_percentage <- census_SF %>%
+  filter(variable %in% c("B01003_001", "B27001_001")) %>%
+  group_by(GEOID) %>%
+  summarise(
+    total_population = sum(estimate[variable == "B01003_001"]),  # Calculate total population
+    health_insurance = sum(estimate[variable == "B27001_001"]),  # Calculate population with health insurance
+    percentage = (health_insurance / total_population) * 100  # Calculate percentage
+  ) %>%
+  arrange(GEOID) %>% 
+  filter(percentage != 0)
+
 
 ```
 
+```{r}
+tm_shape(health_percentage) +
+    tm_polygons("percentage",
+        style="jenks",
+        palette="PuOr",
+        title="health insurance density")
+```
 
+Scatter plot
+```{r}
+#drop geomatry
+health_pure <- st_drop_geometry(health_percentage)
+density_pure <- st_drop_geometry(points_sf_joined)
 
+linear_san <- left_join(health_pure, density_pure, by = c("GEOID" = "geoid10")) %>% 
+  na.omit()
+
+library(units)
+q <- qplot(x = `percentage`, 
+           y = `density`, 
+           data=linear_san)
+
+#plot with a regression line - note, I've added some jitter here as the x-scale is rounded
+q + stat_smooth(method="lm", se=FALSE, size=1) + 
+  geom_jitter()
+```
 
 
 
